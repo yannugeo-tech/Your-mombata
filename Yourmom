@@ -1,0 +1,455 @@
+-- Services & Dependencies
+local Services = setmetatable({}, {
+    __index = function(_, ServiceName)
+        local Success, Service = pcall(function() return game:GetService(ServiceName) end)
+        if Success and Service then return cloneref(Service) end
+        return nil
+    end
+})
+
+local Env = getgenv()
+local Players = Services.Players
+local RunService = Services.RunService
+local ReplicatedStorage = Services.ReplicatedStorage
+local Workspace = Services.Workspace
+local UserInputService = Services.UserInputService
+local CoreGui = Services.CoreGui
+local LocalPlayer = Players.LocalPlayer
+
+-- Clean up existing instances
+if CoreGui:FindFirstChild("RivalsAdminUI") then
+    CoreGui.RivalsAdminUI:Destroy()
+end
+if Env.RageModule then
+    Env.RageModule:Shutdown()
+end
+
+-- Load Modules
+local PlayerScripts = LocalPlayer.PlayerScripts
+local GunModule = require(PlayerScripts.Modules.ItemTypes.Gun)
+local Utility = require(ReplicatedStorage.Modules.Utility)
+
+local CharacterParts = setmetatable({}, {
+    __index = function(_, PartName)
+        local Char = LocalPlayer.Character
+        if not Char then return nil end
+        if PartName == "root" then return Char:FindFirstChild("HumanoidRootPart")
+        elseif PartName == "head" then return Char:FindFirstChild("Head") end
+        return nil
+    end
+})
+
+-- Ragebot Core Module
+Env.RageModule = {}
+do
+    local Module = Env.RageModule
+
+    function Module:Init()  
+        self.Active = false
+        self.Target = nil  
+        self.Desync = false  
+        self.HeartbeatConn = nil  
+        self.DesyncConn = nil  
+        self.ShootTask = nil  
+        self.OriginalStartShooting = nil  
+        self:Setup()  
+    end  
+
+    function Module:Setup()  
+        self.HeartbeatConn = RunService.Heartbeat:Connect(function()  
+            if not self.Active then return end  
+            self.Target = self:FindTarget()  
+        end)  
+
+        local Original = GunModule.StartShooting  
+        self.OriginalStartShooting = Original  
+
+        GunModule.StartShooting = function(GunInstance, ...)  
+            local Results = {Original(GunInstance, ...)}  
+
+            if not GunInstance.ClientFighter or not GunInstance.ClientFighter.IsLocalPlayer then  
+                return unpack(Results)  
+            end  
+
+            local ShootData = Results[3]  
+            if not ShootData or typeof(ShootData) ~= "table" then  
+                return unpack(Results)  
+            end  
+
+            Results[4] = true  
+            local Target = self.Target  
+
+            if not self.Active or not Target or not Target.Character then  
+                return unpack(Results)  
+            end  
+
+            if not self.Desync or self.CurrentTarget ~= Target then  
+                self:StartDesync(Target)  
+                task.wait(0.1)  
+            end  
+
+            if self.ShootTask then  
+                task.cancel(self.ShootTask)  
+                self.ShootTask = nil  
+            end  
+
+            local TargetHead = Target.Character:FindFirstChild("Head")  
+            if not TargetHead then return unpack(Results) end  
+
+            local HeadPos = TargetHead.Position  
+            local HeadCF = TargetHead.CFrame  
+            local BelowPos = HeadPos - Vector3.new(0, 5, 0)  
+            local LookCF = CFrame.lookAt(BelowPos, HeadPos)  
+            local RandomOffset = HeadCF:ToObjectSpace(CFrame.new(HeadPos + Vector3.new(math.random(), math.random(), math.random())))  
+
+            ShootData[utf8.char(0)] = Utility:EncodeCFrame(CFrame.new(BelowPos, HeadPos) * CFrame.Angles(LookCF:ToOrientation()))  
+            ShootData[utf8.char(1)] = Utility:EncodeCFrame(CFrame.new(HeadPos) * CFrame.Angles(LookCF:ToOrientation()))  
+            ShootData[utf8.char(2)] = TargetHead  
+            ShootData[utf8.char(3)] = Utility:EncodeCFrame(RandomOffset)  
+
+            self.ShootTask = task.delay(0.15, function()  
+                self:StopDesync()  
+            end)  
+
+            return unpack(Results)  
+        end  
+    end  
+
+    function Module:FindTarget()  
+        local MyChar = LocalPlayer.Character  
+        if not MyChar then return nil end  
+        local MyRoot = MyChar:FindFirstChild("HumanoidRootPart")  
+        if not MyRoot then return nil end  
+
+        local Closest = nil  
+        local ClosestDist = math.huge  
+        local MAX_DISTANCE = 999999999999  
+
+        for _, Player in next, Players:GetPlayers() do  
+            if Player == LocalPlayer then continue end  
+            if Player:GetAttribute("TeamID") == LocalPlayer:GetAttribute("TeamID") then continue end  
+
+            local Char = Player.Character  
+            if not Char then continue end  
+
+            local Root = Char:FindFirstChild("HumanoidRootPart")  
+            local Head = Char:FindFirstChild("Head")  
+            local Hum = Char:FindFirstChildWhichIsA("Humanoid")  
+
+            if not (Root and Head and Hum and Hum.Health > 0) then continue end  
+
+            local Dist = (MyRoot.Position - Root.Position).Magnitude  
+            if Dist > MAX_DISTANCE then continue end  
+
+            if Dist < ClosestDist then  
+                ClosestDist = Dist  
+                Closest = Player  
+            end  
+        end  
+
+        return Closest  
+    end  
+
+    function Module:StartDesync(Target)  
+        if self.DesyncConn then self.DesyncConn:Disconnect() end  
+        self.Desync = true  
+        self.CurrentTarget = Target  
+
+        self.DesyncConn = RunService.Heartbeat:Connect(function()  
+            if not self.Desync then return end  
+            local MyRoot = CharacterParts.root  
+            if not MyRoot then return end  
+
+            local TargetRoot = Target.Character and Target.Character:FindFirstChild("HumanoidRootPart")  
+            if not TargetRoot then  
+                self:StopDesync()  
+                return  
+            end  
+
+            local SavedCF = MyRoot.CFrame  
+            local SavedVel = MyRoot.Velocity  
+            local SavedRotVel = MyRoot.RotVelocity  
+
+            MyRoot.CFrame = TargetRoot.CFrame * CFrame.new(0, -5, 0)  
+
+            RunService:BindToRenderStep("DesyncRestore", 101, function()  
+                MyRoot.CFrame = SavedCF  
+                MyRoot.Velocity = SavedVel  
+                MyRoot.RotVelocity = SavedRotVel  
+                RunService:UnbindFromRenderStep("DesyncRestore")  
+            end)  
+        end)  
+    end  
+
+    function Module:StopDesync()  
+        self.Desync = false  
+        self.CurrentTarget = nil  
+        if self.DesyncConn then  
+            self.DesyncConn:Disconnect()  
+            self.DesyncConn = nil  
+        end  
+    end  
+
+    function Module:Shutdown()  
+        self.Active = false  
+        if self.HeartbeatConn then self.HeartbeatConn:Disconnect() end  
+        if self.DesyncConn then self.DesyncConn:Disconnect() end  
+        if self.ShootTask then task.cancel(self.ShootTask) end  
+        if self.OriginalStartShooting then  
+            GunModule.StartShooting = self.OriginalStartShooting  
+        end  
+    end  
+
+    Module:Init()
+end
+
+-- ScreenGui Setup
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "RivalsAdminUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = CoreGui
+
+-- Left Side UI Buttons (tap ui / close) - Image Matching Color & Style
+local SideFrame = Instance.new("Frame")
+SideFrame.Size = UDim2.new(0, 100, 0, 90)
+SideFrame.Position = UDim2.new(0.08, 0, 0.22, 0)
+SideFrame.BackgroundTransparency = 1
+SideFrame.Parent = ScreenGui
+
+local TapUIButton = Instance.new("TextButton")
+TapUIButton.Size = UDim2.new(0, 90, 0, 32)
+TapUIButton.Position = UDim2.new(0, 0, 0, 0)
+TapUIButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+TapUIButton.Text = "tap ui"
+TapUIButton.TextColor3 = Color3.fromRGB(0, 0, 0)
+TapUIButton.TextSize = 20
+TapUIButton.Font = Enum.Font.SourceSans
+TapUIButton.Parent = SideFrame
+
+local TapUICorner = Instance.new("UICorner", TapUIButton)
+TapUICorner.CornerRadius = UDim.new(0, 4)
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Size = UDim2.new(0, 90, 0, 32)
+CloseButton.Position = UDim2.new(0, 0, 0, 42)
+CloseButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+CloseButton.Text = "close"
+CloseButton.TextColor3 = Color3.fromRGB(0, 0, 0)
+CloseButton.TextSize = 20
+CloseButton.Font = Enum.Font.SourceSans
+CloseButton.Parent = SideFrame
+
+local CloseCorner = Instance.new("UICorner", CloseButton)
+CloseCorner.CornerRadius = UDim.new(0, 4)
+
+-- Main Frame (Dark Grey/Charcoal Base - Color match with Image)
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 520, 0, 310)
+MainFrame.Position = UDim2.new(0.5, -260, 0.5, -155)
+MainFrame.BackgroundColor3 = Color3.fromRGB(34, 34, 34)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 8)
+
+-- Tab Bar
+local NavFrame = Instance.new("Frame")
+NavFrame.Size = UDim2.new(1, 0, 0, 55)
+NavFrame.BackgroundTransparency = 1
+NavFrame.Parent = MainFrame
+
+local RageTabBtn = Instance.new("TextButton")
+RageTabBtn.Size = UDim2.new(0.33, 0, 1, 0)
+RageTabBtn.Position = UDim2.new(0, 0, 0, 0)
+RageTabBtn.BackgroundTransparency = 1
+RageTabBtn.Text = "rage"
+RageTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+RageTabBtn.TextSize = 36
+RageTabBtn.Font = Enum.Font.SourceSans
+RageTabBtn.Parent = NavFrame
+
+local AimBotTabBtn = Instance.new("TextButton")
+AimBotTabBtn.Size = UDim2.new(0.33, 0, 1, 0)
+AimBotTabBtn.Position = UDim2.new(0.33, 0, 0, 0)
+AimBotTabBtn.BackgroundTransparency = 1
+AimBotTabBtn.Text = "aim bot"
+AimBotTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AimBotTabBtn.TextSize = 36
+AimBotTabBtn.Font = Enum.Font.SourceSans
+AimBotTabBtn.Parent = NavFrame
+
+local ConfigTabBtn = Instance.new("TextButton")
+ConfigTabBtn.Size = UDim2.new(0.33, 0, 1, 0)
+ConfigTabBtn.Position = UDim2.new(0.66, 0, 0, 0)
+ConfigTabBtn.BackgroundTransparency = 1
+ConfigTabBtn.Text = "config"
+ConfigTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ConfigTabBtn.TextSize = 36
+ConfigTabBtn.Font = Enum.Font.SourceSans
+ConfigTabBtn.Parent = NavFrame
+
+-- Pages Container
+local Pages = Instance.new("Frame")
+Pages.Size = UDim2.new(1, 0, 1, -55)
+Pages.Position = UDim2.new(0, 0, 0, 55)
+Pages.BackgroundTransparency = 1
+Pages.Parent = MainFrame
+
+-- Circle Toggle Generator Function
+local function CreateCircleToggle(parent, text, position, callback)
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0, 130, 0, 30)
+    Label.Position = position
+    Label.BackgroundTransparency = 1
+    Label.Text = text
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextSize = 26
+    Label.Font = Enum.Font.SourceSans
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = parent
+
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Size = UDim2.new(0, 20, 0, 20)
+    ToggleBtn.Position = UDim2.new(1, 0, 0.15, 0)
+    ToggleBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleBtn.Text = ""
+    ToggleBtn.Parent = Label
+
+    local CircleCorner = Instance.new("UICorner", ToggleBtn)
+    CircleCorner.CornerRadius = UDim.new(1, 0)
+
+    local Toggled = false
+    ToggleBtn.MouseButton1Click:Connect(function()
+        Toggled = not Toggled
+        ToggleBtn.BackgroundColor3 = Toggled and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(255, 255, 255)
+        if callback then callback(Toggled) end
+    end)
+end
+
+-- Page 1: Rage
+local RagePage = Instance.new("Frame")
+RagePage.Size = UDim2.new(1, 0, 1, 0)
+RagePage.BackgroundTransparency = 1
+RagePage.Visible = true
+RagePage.Parent = Pages
+
+CreateCircleToggle(RagePage, "ragebot", UDim2.new(0.08, 0, 0.18, 0), function(state)
+    Env.RageModule.Active = state
+end)
+
+CreateCircleToggle(RagePage, "rage", UDim2.new(0.08, 0, 0.48, 0), function(state) end)
+
+-- Page 2: Aim Bot
+local AimBotPage = Instance.new("Frame")
+AimBotPage.Size = UDim2.new(1, 0, 1, 0)
+AimBotPage.BackgroundTransparency = 1
+AimBotPage.Visible = false
+AimBotPage.Parent = Pages
+
+CreateCircleToggle(AimBotPage, "esp", UDim2.new(0.08, 0, 0.15, 0))
+CreateCircleToggle(AimBotPage, "fly", UDim2.new(0.55, 0, 0.15, 0))
+CreateCircleToggle(AimBotPage, "Infinity Jump", UDim2.new(0.08, 0, 0.45, 0))
+CreateCircleToggle(AimBotPage, "aim bot", UDim2.new(0.08, 0, 0.75, 0))
+
+-- Page 3: Config (Image Replica)
+local ConfigPage = Instance.new("Frame")
+ConfigPage.Size = UDim2.new(1, 0, 1, 0)
+ConfigPage.BackgroundTransparency = 1
+ConfigPage.Visible = false
+ConfigPage.Parent = Pages
+
+-- Left: cfg name & input
+local CfgLabel = Instance.new("TextLabel")
+CfgLabel.Size = UDim2.new(0, 150, 0, 30)
+CfgLabel.Position = UDim2.new(0.12, 0, 0.08, 0)
+CfgLabel.BackgroundTransparency = 1
+CfgLabel.Text = "cfg name"
+CfgLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+CfgLabel.TextSize = 28
+CfgLabel.Font = Enum.Font.SourceSans
+CfgLabel.Parent = ConfigPage
+
+local CfgTextBox = Instance.new("TextBox")
+CfgTextBox.Size = UDim2.new(0, 130, 0, 32)
+CfgTextBox.Position = UDim2.new(0.14, 0, 0.26, 0)
+CfgTextBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+CfgTextBox.Text = ""
+CfgTextBox.TextColor3 = Color3.fromRGB(0, 0, 0)
+CfgTextBox.TextSize = 18
+CfgTextBox.Font = Enum.Font.SourceSans
+CfgTextBox.Parent = ConfigPage
+
+local CfgTextCorner = Instance.new("UICorner", CfgTextBox)
+CfgTextCorner.CornerRadius = UDim.new(0, 5)
+
+local SaveLeftLabel = Instance.new("TextLabel")
+SaveLeftLabel.Size = UDim2.new(0, 100, 0, 25)
+SaveLeftLabel.Position = UDim2.new(0.17, 0, 0.62, 0)
+SaveLeftLabel.BackgroundTransparency = 1
+SaveLeftLabel.Text = "save"
+SaveLeftLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+SaveLeftLabel.TextSize = 22
+SaveLeftLabel.Font = Enum.Font.SourceSans
+SaveLeftLabel.Parent = ConfigPage
+
+-- Right: Square Config Box Frame (With Glow Effect matching image)
+local ConfigBoxFrame = Instance.new("Frame")
+ConfigBoxFrame.Size = UDim2.new(0, 110, 0, 110)
+ConfigBoxFrame.Position = UDim2.new(0.63, 0, 0.05, 0)
+ConfigBoxFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+ConfigBoxFrame.BorderColor3 = Color3.fromRGB(180, 180, 180)
+ConfigBoxFrame.BorderSizePixel = 4
+ConfigBoxFrame.Parent = ConfigPage
+
+-- Action Labels/Buttons (Non-functional as requested)
+local LoadBtn = Instance.new("TextLabel")
+LoadBtn.Size = UDim2.new(0, 100, 0, 22)
+LoadBtn.Position = UDim2.new(0.64, 0, 0.55, 0)
+LoadBtn.BackgroundTransparency = 1
+LoadBtn.Text = "load"
+LoadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+LoadBtn.TextSize = 22
+LoadBtn.Font = Enum.Font.SourceSans
+LoadBtn.Parent = ConfigPage
+
+local SaveRightBtn = Instance.new("TextLabel")
+SaveRightBtn.Size = UDim2.new(0, 100, 0, 22)
+SaveRightBtn.Position = UDim2.new(0.64, 0, 0.67, 0)
+SaveRightBtn.BackgroundTransparency = 1
+SaveRightBtn.Text = "save"
+SaveRightBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SaveRightBtn.TextSize = 22
+SaveRightBtn.Font = Enum.Font.SourceSans
+SaveRightBtn.Parent = ConfigPage
+
+local DeleteBtn = Instance.new("TextLabel")
+DeleteBtn.Size = UDim2.new(0, 100, 0, 22)
+DeleteBtn.Position = UDim2.new(0.64, 0, 0.79, 0)
+DeleteBtn.BackgroundTransparency = 1
+DeleteBtn.Text = "Delete"
+DeleteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+DeleteBtn.TextSize = 22
+DeleteBtn.Font = Enum.Font.SourceSans
+DeleteBtn.Parent = ConfigPage
+
+-- Tab Switching Logic
+local function SwitchTab(targetPage)
+    RagePage.Visible = false
+    AimBotPage.Visible = false
+    ConfigPage.Visible = false
+    targetPage.Visible = true
+end
+
+RageTabBtn.MouseButton1Click:Connect(function() SwitchTab(RagePage) end)
+AimBotTabBtn.MouseButton1Click:Connect(function() SwitchTab(AimBotPage) end)
+ConfigTabBtn.MouseButton1Click:Connect(function() SwitchTab(ConfigPage) end)
+
+-- Side UI Buttons Action
+TapUIButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = true
+end)
+
+CloseButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+end)
